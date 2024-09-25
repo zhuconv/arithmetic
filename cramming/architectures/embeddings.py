@@ -181,6 +181,7 @@ class LearnablePositional(torch.nn.Module):
         return self.embedding(position_ids)
 
 
+
 class LearnablePositionalRand(torch.nn.Module):
     """Shorthand for a learnable embedding."""
 
@@ -220,6 +221,8 @@ class Rotary(torch.nn.Module):
             return torch.cat((-x2, x1), dim=-1)
 
         def rope_fn(cos: torch.Tensor, sin: torch.Tensor, query_layer: torch.Tensor, key_layer: torch.Tensor):
+            # sin, cos: [seq_len, 1, 1, head_dim]
+            # qk: [seq_len, bsz, num_head, head_dim]
             QK = torch.cat([query_layer, key_layer], dim=1)
             rotated = QK * cos[: QK.shape[0]] + rotate_half(QK) * sin[: QK.shape[0]]
             return torch.split(rotated, query_layer.shape[1], dim=1)
@@ -415,6 +418,200 @@ class RotaryLLAMA(torch.nn.Module):
         freqs = torch.outer(t, freqs).float()  # type: ignore
         freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
         return freqs_cis
+
+
+# Inverse dim formula to find dim based on number of rotations
+def find_correction_dim(num_rotations, dim, base=10000, max_position_embeddings=2048):
+    return (dim * math.log(max_position_embeddings/(num_rotations * 2 * math.pi)))/(2 * math.log(base))
+
+# Find dim range bounds based on rotations
+def find_correction_range(low_rot, high_rot, dim, base=10000, max_position_embeddings=2048):
+    low = math.floor(find_correction_dim(
+        low_rot, dim, base, max_position_embeddings))
+    high = math.ceil(find_correction_dim(
+        high_rot, dim, base, max_position_embeddings))
+    return max(low, 0), min(high, dim-1)  # Clamp values just in case
+
+def linear_ramp_mask(min, max, dim):
+    if min == max:
+        max += 0.001  # Prevent singularity
+
+    linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+    ramp_func = torch.clamp(linear_func, 0, 1)
+    return ramp_func
+
+def get_mscale(scale=1):
+    if scale <= 1:
+        return 1.0
+    return 0.1 * math.log(scale) + 1.0
+
+class YaRNRotary(torch.nn.Module):
+    def __init__(self, dim, num_heads, max_position_embeddings=2048, base=10000, original_max_position_embeddings=2048, extrapolation_factor=1, attn_factor=1, beta_fast=32, beta_slow=1, device=None):
+        super().__init__()
+
+        self.num_heads = num_heads
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        self.original_max_position_embeddings = original_max_position_embeddings
+        self.extrapolation_factor = extrapolation_factor
+        self.attn_factor = attn_factor
+        self.beta_fast = beta_fast
+        self.beta_slow = beta_slow
+
+        # torch.nn.Parameter(inv_freq)
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
+        self.inv_freq = torch.nn.Parameter(inv_freq)
+        self.yarn(self.max_position_embeddings / self.original_max_position_embeddings, device)
+
+        self.max_seq_len_cached = max_position_embeddings
+        # t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        # freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        # emb = torch.cat((freqs, freqs), dim=-1)
+        # dtype = torch.get_default_dtype()
+
+        # # self.register_buffer("cos_cached", (emb.cos() * self.mscale)[None, None, :, :].to(dtype), persistent=False)
+        # self.register_buffer("sin_cached", (emb.sin() * self.mscale)[None, None, :, :].to(dtype), persistent=False)
+
+
+    def forward(self, x, seq_len=None):
+        k = 0
+        if self.training:
+            k = random.randint(0, 99)
+
+        if seq_len > self.max_seq_len_cached:
+            self.max_seq_len_cached = seq_len
+            # inner update self.inv_freq
+            inv_freq = self.yarn(seq_len / self.original_max_position_embeddings, x.device)
+        else:
+            inv_freq = self.inv_freq
+
+        t = torch.arange(seq_len + k, device=inv_freq.device, dtype=inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        # emb.shape: [seq_len, 1]
+        cos_emb = (emb.cos() * self.mscale)[:, None, None, :].repeat(1, 1, self.num_heads, 1)
+        sin_emb = (emb.sin() * self.mscale)[:, None, None, :].repeat(1, 1, self.num_heads, 1)
+
+        batch_size = x.size(1)
+        cos_expanded = cos_emb[ k: seq_len + k, ...].expand(-1, batch_size, -1, -1)
+        sin_expanded = sin_emb[ k: seq_len + k, ...].expand(-1, batch_size, -1, -1)
+
+        return (
+            cos_expanded.to(dtype=x.dtype),
+            sin_expanded.to(dtype=x.dtype),
+        )
+
+    def yarn(self, scale, device):
+        # pos_freqs = 1.0 / 
+        inv_freq_extrapolation = self.inv_freq
+        inv_freq_interpolation = inv_freq_extrapolation / scale
+
+        low, high = find_correction_range(self.beta_fast, self.beta_slow, self.dim, self.base, self.original_max_position_embeddings)
+        inv_freq_mask = (1 - linear_ramp_mask(low, high, self.dim // 2).to(device)) * self.extrapolation_factor # Get n-d rotational scaling corrected for extrapolation
+        inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
+
+        self.mscale = float(get_mscale(scale) * self.attn_factor) # Get n-d magnitude scaling corrected for interpolation
+        return inv_freq
+
+
+class AdaRotary(torch.nn.Module):
+    def __init__(self, dim, num_heads, max_position_embeddings=2048, base=10000, device=None, scaling_factor=1.0):
+        super().__init__()
+        self.scaling_factor = scaling_factor
+        self.num_heads = num_heads
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
+        self.inv_freq = torch.nn.Parameter(inv_freq)
+        # self.inv_freq = inv_freq
+        self.max_seq_len_cached = 1024 if max_position_embeddings == 0 else max_position_embeddings
+
+    # def _set_cos_sin_cache(self, seq_len, device, dtype):
+    #     self.max_seq_len_cached = seq_len
+    #     t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+
+    #     freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+    #     emb = torch.cat((freqs, freqs), dim=-1)
+        
+    #     # 将cos_cached和sin_cached更新为nn.Parameter
+    #     with torch.no_grad():  # 在初始化时我们不想要梯度计算
+    #         cos_emb = emb.cos()[None, None, :, :].to(dtype)
+    #         sin_emb = emb.sin()[None, None, :, :].to(dtype)
+            
+    #         self.cos_cached.copy_(cos_emb.repeat(1, self.num_heads, 1, 1))
+    #         self.sin_cached.copy_(sin_emb.repeat(1, self.num_heads, 1, 1))
+            
+    def extend_seq_length(self, cos, sin, multiplier=2):
+        # [seqlen, 1, num_head, head_dim]
+        # cos/sin shape: (1, num_heads, seq_len, head_dim)
+        old_len = cos.shape[0]  # 第三个维度是 seq_len
+        new_len = old_len * multiplier
+        
+        # 初始化新的 cos 和 sin 张量，形状为 (1, num_heads, new_len, head_dim)
+        new_cos = torch.zeros((new_len, 1, cos.shape[2], cos.shape[3]), device=cos.device, dtype=cos.dtype)
+        new_sin = torch.zeros((new_len, 1, sin.shape[2], sin.shape[3]), device=sin.device, dtype=sin.dtype)
+
+        # 复制原始 cos 和 sin 到新的张量中
+        new_cos[:old_len, ...] = cos
+        new_sin[:old_len, ...] = sin
+
+        # 迭代填充扩展部分
+        for i in range(1, multiplier):
+            for j in range(old_len):
+                index1 = old_len * i - 1  # 固定为前一块的最后一个元素
+                index2 = j  # 当前块对应的元素
+                new_cos[old_len * i + j, ...], new_sin[old_len * i + j, ...] = self.angle_sum(new_cos, new_sin, index1, index2)
+
+        return new_cos, new_sin
+
+    def angle_sum(self, cos, sin, index1, index2):
+        # new shape [seqlen, 1, num_head, head_dim]
+        # cos/sin shape: 1, num_heads, seq_len,  head_dim
+        cos1, cos2 = cos[index1, ...], cos[index2, ...] 
+        sin1, sin2 = sin[index1, ...], sin[index2, ...]  
+        ret_cos = cos1 * cos2 - sin1 * sin2
+        ret_sin = cos1 * sin2 + cos2 * sin1
+        return ret_cos, ret_sin
+
+
+    def forward(self, x, seq_len=None):
+        # query_layer: [seqlen, bsz, num_head, head_dim]
+        # 根据 inv_freq 计算 cos 和 sin
+        # position_layer: [seqlen, bsz, num_head, head_dim]
+        k = 0
+        if self.training:
+            k = random.randint(0, 99)
+        # position_ids = torch.arange(seq_len, device=x.device)
+        # position_ids = position_ids + k 
+
+        # position augmentation for k ...
+        t = torch.arange(seq_len + k, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        t = t / self.scaling_factor
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        # emb.shape: [seq_len, 1]
+        cos_emb = emb.cos()[:, None, None, :].repeat(1, 1, self.num_heads, 1)
+        sin_emb = emb.sin()[:, None, None, :].repeat(1, 1, self.num_heads, 1)
+
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        if seq_len > self.max_seq_len_cached:
+            assert False
+            multiplier = seq_len // self.max_seq_len_cached if seq_len % self.max_seq_len_cached == 0 else seq_len // self.max_seq_len_cached + 1
+            cos, sin = self.extend_seq_length(cos_emb, sin_emb, multiplier)
+            cos_emb, sin_emb = torch.nn.Parameter(cos), torch.nn.Parameter(sin)
+            self.max_seq_len_cached = multiplier * seq_len
+
+        batch_size = x.size(1)
+        cos_expanded = cos_emb[ k: seq_len + k, ...].expand(-1, batch_size, -1, -1)
+        sin_expanded = sin_emb[ k: seq_len + k, ...].expand(-1, batch_size, -1, -1)
+
+        return (
+            cos_expanded.to(dtype=x.dtype),
+            sin_expanded.to(dtype=x.dtype),
+        )
 
 class FIRE(torch.nn.Module):
     def __init__(self, num_heads=12, mlp_width=32, init_c=0.1, init_L=512.0, eps=1e-6, max_length=0):

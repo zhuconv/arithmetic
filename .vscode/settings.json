@@ -1,0 +1,4 @@
+{
+    "SLURM_SBATCH_FLAGS": "--constraint=gpu80 --time=1:00:00",
+    "SOCAT_PORT": 3000
+}

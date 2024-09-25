@@ -4,7 +4,7 @@ base_dir = "cramming-data"
 
 # pick which eval you are doing
 add_100 = False
-add_110+ = False
+# add_110+ = False
 add_small = False
 mul = False
 sort = True

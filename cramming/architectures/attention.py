@@ -2,7 +2,7 @@
 import torch
 from transformers.models.bert.modeling_bert import BertSelfAttention
 
-from .embeddings import Rotary, RotarySanityCheck, RotaryEleutherAI, RotaryLLAMA, FIRE
+from .embeddings import Rotary, RotarySanityCheck, RotaryEleutherAI, RotaryLLAMA, FIRE, AdaRotary
 from typing import Optional
 
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear  # use to mark output projections of attn while it exists
@@ -11,7 +11,10 @@ from torch.nn.modules.linear import NonDynamicallyQuantizableLinear  # use to ma
 def get_attention_mechanism(idx, hidden_size, cfg_attention, norm_fn: torch.nn.Identity):
     # ########## main implementation
     if cfg_attention.type == "self-attention":
-        mechanism = SeqFirstSelfAttention(hidden_size, cfg_attention, norm_fn)  # neox
+        if cfg_attention.rotary_embedding == "adape":
+            mechanism = SeqFirstSelfAdaAttention(hidden_size, cfg_attention, norm_fn)
+        else:
+            mechanism = SeqFirstSelfAttention(hidden_size, cfg_attention, norm_fn)  # neox
     # ########## other things:
     elif cfg_attention.type == "pytorch":
         mechanism = SelfAttentionPyTorch(hidden_size, cfg_attention)  # torch default
@@ -137,6 +140,186 @@ class SeqFirstSelfAttentionPyTorch(torch.nn.Module):
             is_causal=True,
         )[0]
 
+class SeqFirstSelfAdaAttention(torch.nn.MultiheadAttention):
+
+    __constants__ = ["LAYOUT"]
+    LAYOUT: str = "[S B H]"
+
+    def __init__(self, hidden_size: int, cfg_attention, norm_module=torch.nn.Identity):
+        torch.nn.Module.__init__(self)
+        self.hidden_size = hidden_size
+        self.num_attention_heads = cfg_attention.num_attention_heads
+        self.hidden_per_head = self.hidden_size // cfg_attention.num_attention_heads
+        self.register_buffer("norm_factor", torch.tensor(self.hidden_per_head).rsqrt())
+        self.cfg_attention = cfg_attention
+        self.use_fire = False
+
+        self.norm = norm_module()
+
+        # Strided linear layer.
+        self.in_proj_weight = torch.nn.Parameter(torch.randn(3 * self.hidden_size, self.hidden_size))
+        if cfg_attention.qkv_bias:
+            self.in_proj_bias = torch.nn.Parameter(torch.zeros(3 * self.hidden_size))
+        else:
+            self.in_proj_bias = None
+        self.bias_k, self.bias_v = None, None  # for compat with MultiheadAttention
+
+        self.output_dim = hidden_size
+        if cfg_attention.rotary_embedding == "sanity":
+            self.rotary_emb = RotarySanityCheck(self.hidden_per_head, seq_dim=0)
+        elif cfg_attention.rotary_embedding == "v2":
+            self.rotary_emb = RotaryEleutherAI(self.hidden_per_head)
+        elif cfg_attention.rotary_embedding == "llama":
+            self.rotary_emb = RotaryLLAMA(self.hidden_per_head)
+        elif cfg_attention.rotary_embedding == "fire":
+            self.rotary_emb = FIRE(cfg_attention.num_attention_heads, max_length=cfg_attention.max_length)
+            self.use_fire = True
+        elif cfg_attention.rotary_embedding == 'adape':
+            self.rotary_emb = None
+        elif cfg_attention.rotary_embedding: # other include rope
+            self.rotary_emb = Rotary(self.hidden_per_head, seq_dim=0)
+        else:
+            self.rotary_emb = None
+            
+        if cfg_attention.sequence_op == "torch-softmax":
+            self.sequence_op = TorchSoftmax(cfg_attention.seq_op_in_fp32)
+        elif cfg_attention.sequence_op == "shaped-attention":
+            self.sequence_op = TorchShaped(cfg_attention.seq_op_in_fp32, hidden_size=self.hidden_size)
+        elif cfg_attention.sequence_op == "swin-cosine":
+            self.sequence_op = SwinCosine(cfg_attention.seq_op_in_fp32)
+        elif cfg_attention.sequence_op == "torch-norm":
+            self.sequence_op = TorchNormalize(self.num_attention_heads, cfg_attention.seq_op_in_fp32)
+        elif cfg_attention.sequence_op == "none":
+            self.sequence_op = ScaledIdentity(cfg_attention.seq_op_in_fp32)
+        elif cfg_attention.sequence_op == "cumsum":
+            self.sequence_op = Cumsum(cfg_attention.seq_op_in_fp32)
+        elif cfg_attention.sequence_op == "cumsumexp":
+            self.sequence_op = CumsumExp(cfg_attention.seq_op_in_fp32)
+        else:
+            raise ValueError(f"Invalid sequence operation {cfg_attention.sequence_op} given.")
+
+        if cfg_attention.skip_output_projection:
+            self.out_proj = torch.nn.Identity()
+        else:
+            self.out_proj = NonDynamicallyQuantizableLinear(hidden_size, hidden_size, bias=cfg_attention.bias_in_proj)
+
+        self.attention_func = self.attention
+
+    def attention(self, query_layer, key_layer, value_layer, position_layer, attention_mask: Optional[torch.Tensor] = None, training: bool = False, fire: Optional[torch.Tensor] = None):
+        # ===================================
+        # Raw attention scores. [b, np, s, s]
+        # ===================================
+
+        # [b, np, sq, sk]
+        output_size = (query_layer.shape[1], query_layer.shape[2], query_layer.shape[0], key_layer.shape[0])
+
+        # [sq, b, np, hn] -> [sq, b * np, hn]
+        query_layer = query_layer.view(output_size[2], output_size[0] * output_size[1], -1)
+        key_layer = key_layer.view(output_size[3], output_size[0] * output_size[1], -1)
+
+        # this better be fused in a clever way:
+        matmul_result = torch.bmm(query_layer.transpose(0, 1), key_layer.transpose(0, 1).transpose(1, 2)) * self.norm_factor
+
+        # change view to [b, np, sq, sk]
+        attention_scores = matmul_result.view(output_size[0], output_size[1], output_size[2], output_size[3])
+        if fire is not None:
+            attention_scores += fire
+
+        # ===========================
+        # Attention probs
+        # ===========================
+        # attention scores and attention mask [b, np, sq, sk]
+        attention_probs = self.sequence_op(attention_scores, attention_mask)
+
+        # [b, np, sq, sk]
+        # position_layer: [sk, 1, np, hn]
+        position_layer0 = torch.einsum('qbnh,bnqk->kbnh', position_layer[0], attention_probs)
+        position_layer1 = torch.einsum('qbnh,bnqk->kbnh', position_layer[1], attention_probs)
+        position_layer = (position_layer0, position_layer1)
+
+        # =========================
+        # Context layer. [sq, b, hp]
+        # =========================
+
+        # value_layer -> context layer.
+        # [sk, b, np, hn] --> [b, np, sq, hn]
+
+        # context layer shape: [b, np, sq, hn]
+        output_size = (value_layer.shape[1], value_layer.shape[2], query_layer.shape[0], value_layer.shape[3])
+
+        # change view [sk, b * np, hn]
+        value_layer = value_layer.view(value_layer.size(0), output_size[0] * output_size[1], -1)
+
+        # change view [b * np, sq, sk]
+        attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
+
+        # matmul: [b * np, sq, hn]
+        context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
+        
+
+        # change view [b, np, sq, hn]
+        # pos_layer view [sk, b, np, hn]
+        context_layer = context_layer.view(*output_size)
+        return context_layer, position_layer
+    
+    def rotate_half(self, x: torch.Tensor):
+        x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]  # torch.split(x, x.shape[-1] // 2, dim=-1)  # not faster
+        return torch.cat((-x2, x1), dim=-1)
+
+
+    def apply_rotary_emb(self, query_layer: torch.Tensor, key_layer: torch.Tensor, position_layer: torch.Tensor):
+        # [sk, b, np, hn]
+        cos, sin = position_layer
+        # sin, cos: [seq_len, 1, 1, head_dim]
+        # qk: [seq_len, bsz, num_head, head_dim]
+        cos2 = torch.cat([cos, cos], dim=1)
+        sin2 = torch.cat([sin, sin], dim=1)
+        QK = torch.cat([query_layer, key_layer], dim=1)
+        rotated = QK * cos2[: QK.shape[0]] + self.rotate_half(QK) * sin2[: QK.shape[0]]
+        return torch.split(rotated, query_layer.shape[1], dim=1)
+
+    def forward(self, hidden_states, position_states, attention_mask: Optional[torch.Tensor] = None):
+        # =====================
+        # hidden_states: [sq, b, h]
+        # Query, Key, and Value
+        # =====================
+        # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
+        mixed_x_layer = torch.nn.functional.linear(hidden_states, self.in_proj_weight, self.in_proj_bias)
+
+        # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
+        # new_tensor_shape = mixed_x_layer.size()[:-1] + (self.num_attention_heads, 3 * self.hidden_per_head)
+        mixed_x_layer = mixed_x_layer.view(
+            hidden_states.shape[0], hidden_states.shape[1], self.num_attention_heads, 3 * self.hidden_per_head
+        )
+        # print("mixed shape ",mixed_x_layer.shape) (82, 24, 16, 192)
+
+        # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
+        (query_layer, key_layer, value_layer) = torch.split(mixed_x_layer, [self.hidden_per_head] * 3, dim=3)
+        #! above almost same, query_shape: [seq, bsz, n_head, hidden_per]
+        
+        fire = None
+        # position_state: 2 x [seq, 1, num_heads, head_dim]
+        self.apply_rotary_emb(query_layer, key_layer, position_states)
+        # if self.rotary_emb is not None:
+            # if 
+            # elif self.use_fire:
+            #     fire = self.rotary_emb(query_layer.size(0), query_layer.device)
+            # else:
+            #     query_layer, key_layer = self.rotary_emb(query_layer, key_layer, position_states)
+                # print(query_layer.shape)
+
+        # ==================================
+        # Attention computation
+        # ==================================
+        context_layer, position_layer = self.attention_func(query_layer, key_layer, value_layer, position_states, attention_mask, self.training, fire)
+
+        # [b, np, sq, hn] --> [sq, b, np, hn]
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+
+        # [sq, b, np, hn] --> [sq, b, hp]
+        # new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size,)
+        context_layer = context_layer.view(context_layer.shape[0], context_layer.shape[1], self.hidden_size)
+        return self.out_proj(self.norm(context_layer)), position_layer
 
 class SeqFirstSelfAttention(torch.nn.MultiheadAttention):
     """Self-attention layer.
@@ -181,7 +364,7 @@ class SeqFirstSelfAttention(torch.nn.MultiheadAttention):
         elif cfg_attention.rotary_embedding == "fire":
             self.rotary_emb = FIRE(cfg_attention.num_attention_heads, max_length=cfg_attention.max_length)
             self.use_fire = True
-        elif cfg_attention.rotary_embedding:
+        elif cfg_attention.rotary_embedding: # other include rope
             self.rotary_emb = Rotary(self.hidden_per_head, seq_dim=0)
         else:
             self.rotary_emb = None

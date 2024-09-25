@@ -1,7 +1,10 @@
 # there is an automated helper in gen_eval_script.py for generating these evaluation scripts
-
+name=${name:-add_ronope}
 # Addition
-python arithmetic_eval_quicker.py name=<name> base_dir=$cramming_base_dir data=arithmetic max_rec=<max_rec> token_limit=105 big_eval_step_<STEP_NUM>=True reverse_inputs=True checkerboard=<EVEN/ODD> remove_padding=True data.sources.arithmetic.tokenizer_type="pad"
+python arithmetic_eval_quicker.py name=add_ropecus base_dir=$cramming_base_dir data=arithmetic max_rec=1 token_limit=105 big_eval_step_1=True reverse_inputs=True checkerboard=even remove_padding=True data.sources.arithmetic.tokenizer_type="pad"
+
+CUDA_VISIBLE_DEVICES=1 python arithmetic_eval_quicker.py name=add_ronope base_dir=$cramming_base_dir data=arithmetic max_rec=1 token_limit=105 big_eval_step_1=True reverse_inputs=True checkerboard=even remove_padding=True data.sources.arithmetic.tokenizer_type="pad"
+
 
 # Extended Addition Eval, i.e. 100
 python arithmetic_eval_quicker.py name=<name> base_dir=$cramming_base_dir data=arithmetic max_rec=<max_Rec> token_limit=105 big_eval_step_5=True reverse_inputs=True checkerboard=even remove_padding=True extended_eval=True data.sources.arithmetic.tokenizer_type="pad"

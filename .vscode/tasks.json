@@ -1,0 +1,39 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "startup",
+            "type": "shell",
+            "command": "srun -n1 python ${relativeFile}",
+        },
+        {
+            "label": "launch-batch",
+            "type": "shell",
+            "command": "/bin/bash ${workspaceFolder}/.vscode/launch-batch.sh",
+        },
+        {
+            "label": "slurm-connect",
+            "type": "shell",
+            "command": "/bin/bash ${workspaceFolder}/.vscode/slurm-connect.sh ${config:SOCAT_PORT}",
+            "dependsOn":["launch-batch"],
+            "isBackground": true,
+            "problemMatcher": [
+                {
+                  "pattern": [
+                    {
+                      "regexp": ".",
+                      "file": 1,
+                      "location": 2,
+                      "message": 3
+                    }
+                  ],
+                  "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": ".",
+                    "endsPattern": ".",
+                  }
+                }
+            ]
+        }
+    ]
+}

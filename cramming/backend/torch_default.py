@@ -75,7 +75,7 @@ class TorchEngine(torch.nn.Module):
         # Modules like LN are unsupported on CPU amp, so mixed precision args are disregarded on CPU
         # See https://pytorch.org/docs/stable/amp.html#cpu-op-specific-behavior and check for layer_norm
         enable_scaling = self.cfg_impl.grad_scaling and self.cfg_impl.mixed_precision and setup["device"].type != "cpu"
-        self.scaler = torch.cuda.amp.GradScaler(enabled=enable_scaling)
+        self.scaler = torch.amp.GradScaler("cuda",enabled=enable_scaling)
         amp_dtype = getattr(torch, self.cfg_impl.mixed_precision_target_dtype) if setup["device"].type != "cpu" else torch.bfloat16
         self.amp_settings = dict(device_type=setup["device"].type, enabled=enabled, dtype=amp_dtype)
 

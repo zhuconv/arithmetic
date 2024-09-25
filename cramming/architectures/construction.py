@@ -4,7 +4,7 @@ from .huggingface_interface import construct_huggingface_model
 from .sanity_check import SanityCheckforPreTraining
 from .crammed_transformer import construct_crammed_transformer
 from .crammed_depthrecurrent import construct_crammed_recurrent
-
+from .crammed_adadepthrecurrent import construct_crammed_adarecurrent
 import logging
 from ..utils import is_main_process
 
@@ -23,6 +23,9 @@ def construct_model(cfg_arch, tokenizer):
         elif "ScriptableCrammedDepthRecurrent" in cfg_arch.model_type:
             equals_token = tokenizer.vocab["="]
             model = construct_crammed_recurrent(cfg_arch, tokenizer.vocab_size, equals_token)
+        elif "ScriptableCrammedAdaDepthRecurrent" in cfg_arch.model_type: 
+            equals_token = tokenizer.vocab["="]
+            model = construct_crammed_adarecurrent(cfg_arch, tokenizer.vocab_size, equals_token)
 
     if model is not None:  # Return local model arch
         num_params = sum([p.numel() for p in model.parameters()])

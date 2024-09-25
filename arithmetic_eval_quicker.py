@@ -25,15 +25,15 @@ def grid_plotter(data, type="accs", name='_large', extra_path=None):
 
     # Create the heatmap
     plt.figure(figsize=(10, 8))
-    sns.heatmap(df, cmap="YlGnBu", fmt=".1f", annot_kws={'size': 8,'rotation':0})
+    sns.heatmap(df, cmap="YlGnBu", fmt=".1f", annot_kws={'size': 8,'rotation':0}, vmin=0, vmax=1)
     
     # Customize the plot
     plt.title("Accuracy - percetange, rounded to 1dp")
     plt.ylabel("1st Number Length")
     plt.xlabel("2nd Number Length")
     size = data.shape[0]
-    plt.xticks(np.arange(0.5, size+0.5, 1), labels=np.arange(1, size+1, 1))
-    plt.yticks(np.arange(0.5, size+0.5, 1), labels=np.arange(1, size+1, 1))
+    plt.xticks(np.arange(0.5, size+0.5, 10), labels=np.arange(0, size, 10))
+    plt.yticks(np.arange(0.5, size+0.5, 10), labels=np.arange(0, size, 10))
 
     if extra_path is not None:
         plt.savefig(f"{extra_path}{type}{name}_grid_plot", bbox_inches='tight')
@@ -104,77 +104,70 @@ def grid_logic(cfg):
         checkerboard_func = always_true
         checkerboard_str = ""
 
-
     # if we are testing up to 100, split into 10 steps each of approximately equal number of forward passes required
+    my_list = [10, 19, 27, 34, 40, 45, 48, 50]
     if cfg.big_eval_step_1: # 1 -> 46
         def logic_func_big_1(data_size_1, data_size_2):
-            return (data_size_1 <= 46 and data_size_2 <= 46) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 <= 30 and data_size_2 <= 30) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_1
         name = '_big_eval_1'+checkerboard_str
-        max_size = 100+1
-        
+        max_size = 50 + 1        
     if cfg.big_eval_step_2: # 47 -> 58
         def logic_func_big_2(data_size_1, data_size_2):
-            return (data_size_1 >=47 or data_size_2 >=47) and (data_size_1 <=58 and data_size_2 <=58) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 >= 31 or data_size_2 >= 31) and (data_size_1 <= 35 and data_size_2 <= 35) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_2
         name = '_big_eval_2'+checkerboard_str
-        max_size = 100+1
-        
-    if cfg.big_eval_step_3: # 59 -> 67
+        max_size = 50 + 1
+    if cfg.big_eval_step_3: # 47 -> 58
         def logic_func_big_3(data_size_1, data_size_2):
-            return (data_size_1 >=59 or data_size_2 >=59) and (data_size_1 <=67 and data_size_2 <=67) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 >= 36 or data_size_2 >= 36) and (data_size_1 <= 39 and data_size_2 <= 39) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_3
         name = '_big_eval_3'+checkerboard_str
-        max_size = 100+1
-        
-    if cfg.big_eval_step_4: # 68 -> 74
+        max_size = 50 + 1
+    if cfg.big_eval_step_4: # 59 -> 67
         def logic_func_big_4(data_size_1, data_size_2):
-            return (data_size_1 >=68 or data_size_2 >=68) and (data_size_1 <=74 and data_size_2 <=74) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 >= 40 or data_size_2 >= 40) and (data_size_1 <= 42 and data_size_2 <= 42) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_4
         name = '_big_eval_4'+checkerboard_str
-        max_size = 100+1
-      
-    if cfg.big_eval_step_5: # 75 -> 80
+        max_size = 50 + 1
+    if cfg.big_eval_step_5: # 68 -> 74
         def logic_func_big_5(data_size_1, data_size_2):
-            return (data_size_1 >= 75 or data_size_2 >=75) and (data_size_1 <=80 and data_size_2 <=80) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 >= 43 or data_size_2 >= 43) and (data_size_1 <=45 and data_size_2 <= 45) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_5
         name = '_big_eval_5'+checkerboard_str
-        max_size = 100+1
-
-    if cfg.big_eval_step_6: # 81 -> 85
+        max_size = 50 + 1      
+    if cfg.big_eval_step_6: # 75 -> 80
         def logic_func_big_6(data_size_1, data_size_2):
-            return (data_size_1 >= 81 or data_size_2 >=81) and (data_size_1 <=85 and data_size_2 <=85) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 >= 46 or data_size_2 >= 46) and (data_size_1 <=47 and data_size_2 <= 47) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_6
         name = '_big_eval_6'+checkerboard_str
-        max_size = 100+1
-        
-    if cfg.big_eval_step_7: # 86 -> 90
+        max_size = 50 + 1
+    if cfg.big_eval_step_7: # 81 -> 85
         def logic_func_big_7(data_size_1, data_size_2):
-            return (data_size_1 >= 86 or data_size_2 >=86) and (data_size_1 <=90 and data_size_2 <=90) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 >= 48 or data_size_2 >=48) and (data_size_1 <= 49 and data_size_2 <= 49) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_7
         name = '_big_eval_7'+checkerboard_str
-        max_size = 100+1
-        
-    if cfg.big_eval_step_8: # 91 -> 94
+        max_size = 50 + 1        
+    if cfg.big_eval_step_8: # 86 -> 90
         def logic_func_big_8(data_size_1, data_size_2):
-            return (data_size_1 >= 91 or data_size_2 >=91) and (data_size_1 <=94 and data_size_2 <=94) and checkerboard_func(data_size_1, data_size_2)
+            return (data_size_1 >= 50 or data_size_2 >= 50) and (data_size_1 <= 50 and data_size_2 <= 50) and checkerboard_func(data_size_1, data_size_2)
         logic_func = logic_func_big_8
         name = '_big_eval_8'+checkerboard_str
-        max_size = 100+1
+        max_size = 50 + 1
     
-    if cfg.big_eval_step_9: # 95 -> 97
-        def logic_func_big_9(data_size_1, data_size_2):
-            return (data_size_1 >= 95 or data_size_2 >=95) and (data_size_1 <=97 and data_size_2 <=97) and checkerboard_func(data_size_1, data_size_2)
-        logic_func = logic_func_big_9
-        name = '_big_eval_9'+checkerboard_str
-        max_size = 100+1
+    # if cfg.big_eval_step_9: # 95 -> 97
+    #     def logic_func_big_9(data_size_1, data_size_2):
+    #         return (data_size_1 >= 95 or data_size_2 >=95) and (data_size_1 <=97 and data_size_2 <=97) and checkerboard_func(data_size_1, data_size_2)
+    #     logic_func = logic_func_big_9
+    #     name = '_big_eval_9'+checkerboard_str
+    #     max_size = 100+1
         
-    if cfg.big_eval_step_10: # 98 -> 100
-        def logic_func_big_10(data_size_1, data_size_2):
-            return (data_size_1 >= 98 or data_size_2 >=98) and (data_size_1 <=100 and data_size_2 <=100) and checkerboard_func(data_size_1, data_size_2)
-        logic_func = logic_func_big_10
-        name = '_big_eval_10'+checkerboard_str
-        max_size = 100+1
+    # if cfg.big_eval_step_10: # 98 -> 100
+    #     def logic_func_big_10(data_size_1, data_size_2):
+    #         return (data_size_1 >= 98 or data_size_2 >=98) and (data_size_1 <=100 and data_size_2 <=100) and checkerboard_func(data_size_1, data_size_2)
+    #     logic_func = logic_func_big_10
+    #     name = '_big_eval_10'+checkerboard_str
+    #     max_size = 100+1
 
     # boolean_list_precidence = [large, ood_only, up_to_40, up_to_50, big_eval_step_1, big_eval_step_2, big_eval_step_3, big_eval_step_4, big_eval_step_5]
 
@@ -199,9 +192,7 @@ def grid_logic(cfg):
 def main(cfg):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     local_checkpoint_folder = os.path.join(cfg.base_dir, cfg.name, "checkpoints")
-    tokenizer, cfg_arch, model_file = cramming.utils.find_pretrained_checkpoint(cfg.eval.checkpoint,
-                                                                                local_checkpoint_folder,
-                                                                                cfg.eval.arch_modifications)
+    tokenizer, cfg_arch, model_file = cramming.utils.find_pretrained_checkpoint(cfg.eval.checkpoint,local_checkpoint_folder, cfg.eval.arch_modifications)
     if cfg.max_rec is not None: # can have more/less recurrences for eval
         cfg_arch.maximal_recurrence_in_eval = cfg.max_rec
     else:
@@ -259,7 +250,7 @@ def main(cfg):
     ## Greedy decoding will overide any temperature arguments
 
     if cfg.max_size_given is not None: # allows unique splits for eval
-        max_size = max_size_given
+        max_size = cfg.max_size_given
 
     # Grid plots - grid search from 1x1 to 12x12 data
     data_sizes = list(range(1, max_size))
@@ -268,6 +259,7 @@ def main(cfg):
     start_ind_2 = 0
     tuple_method = False
     completed_one = False
+    # load previous
     if "big_eval" in name:
         tuple_method = True
         # go up two layers and search for grid
@@ -305,21 +297,20 @@ def main(cfg):
                     if not proceed:
                         continue
 
-                print(f"evaluating for {data_size_1} and {data_size_2}")
-
                 if logic_func(data_size_1, data_size_2):
+                    print(f"evaluating for {data_size_1} and {data_size_2}")
                     completed_one = True
                     log.info(f"Starting iteration in grid eval for size: {data_size_1} and {data_size_2}")
                     correct_total = 0
 
                     # get the correct dataset, these names may need to be changed if you make new datasets
-                    file_path = f"../../../../data/arithmetic_data/+_grid_eval_dataset_padded_tokenized/+_n_{data_size_1}_m_{data_size_2}_examples_100_diff_lens_seed_42/hf_tokenized_dataset"
+                    file_path = f"../../../../data/+_grid_eval_dataset_padded_tokenized/+_n_{data_size_1}_m_{data_size_2}_examples_100_diff_lens_seed_42/hf_tokenized_dataset"
                     if cfg.reverse_inputs:
-                        file_path = f"../../../../data/arithmetic_data/+_grid_eval_dataset_reverse_all_tokenized/+_n_{data_size_1}_m_{data_size_2}_examples_100_diff_lens_seed_42/hf_tokenized_dataset"
+                        file_path = f"../../../../data/+_grid_eval_dataset_reverse_all_tokenized/+_n_{data_size_1}_m_{data_size_2}_examples_100_diff_lens_seed_42/hf_tokenized_dataset"
                     if cfg.mul:
-                        file_path = f"../../../../data/arithmetic_data/x_grid_eval_dataset_2_reverse_all_tokenized/x_n_{data_size_1}_m_{data_size_2}_examples_100_diff_lens_exact_seed_91/hf_tokenized_dataset"
+                        file_path = f"../../../../data/x_grid_eval_dataset_2_reverse_all_tokenized/x_n_{data_size_1}_m_{data_size_2}_examples_100_diff_lens_exact_seed_91/hf_tokenized_dataset"
                     if cfg.pos_arth or cfg.pos_arth_ood:
-                        file_path = f"../../../../data/arithmetic_data/pos_or_one_vec_zeros_eval/or_one_vec_zeros_{data_size_1}_{data_size_2}/hf_tokenized_dataset"
+                        file_path = f"../../../../data/pos_or_one_vec_zeros_eval/or_one_vec_zeros_{data_size_1}_{data_size_2}/hf_tokenized_dataset"
                     tokenized_dataset = datasets.load_from_disk(file_path)["test"]
                     data_loader = torch.utils.data.DataLoader(tokenized_dataset, batch_size=100, shuffle=False)
                     equals_tensor = data_size_1+data_size_2+6
@@ -455,7 +446,7 @@ def main(cfg):
         for data_size in list_to_do:
             log.info(f"Extended eval {data_size}")
             correct_total = 0
-            file_path = f"../../../../data/arithmetic_data/+_grid_eval_dataset_reverse_all_tokenized_over_100/+_n_{data_size}_m_{data_size}_examples_100_diff_lens_exact_seed_42/hf_tokenized_dataset"
+            file_path = f"../../../../data/+_grid_eval_dataset_reverse_all_tokenized_over_100/+_n_{data_size}_m_{data_size}_examples_100_diff_lens_exact_seed_42/hf_tokenized_dataset"
             tokenized_dataset = datasets.load_from_disk(file_path)["test"]
             data_loader = torch.utils.data.DataLoader(tokenized_dataset, batch_size=batch_size_extended_eval, shuffle=False)
             equals_tensor = data_size+data_size+6
