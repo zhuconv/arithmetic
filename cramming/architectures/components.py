@@ -81,8 +81,10 @@ class NormalizedResidualConnection(torch.nn.Module):
             self._chosen_forward_impl = self._prenormalization_residual
         elif cfg_arch.norm_scheme == "post": # default in depth recurent
             self.norm = _get_norm_fn(cfg_arch.norm)(output_dim, eps=cfg_arch.norm_eps)
-            if cfg_arch.attention.rotary_embedding == 'adape':
-                self._chosen_forward_impl = self._postnormalization_residual_with_position_states
+            if cfg_arch.attention.rotary_embedding in ['adape', 'adayarn']:
+                self._chosen_forward_impl = self._postnormalization_residual_with_two_position_states
+            elif cfg_arch.attention.rotary_embedding == 'adalibi':
+                self._chosen_forward_impl = self._postnormalization_residual_with_one_position_states
             else:
                 self._chosen_forward_impl = self._postnormalization_residual
         elif cfg_arch.norm_scheme == "simple":
@@ -117,11 +119,15 @@ class NormalizedResidualConnection(torch.nn.Module):
     def _postnormalization_residual(self, residual, layer, states, *args, **kwargs):
         return self.norm(residual + layer(states, *args, **kwargs))
 
-    def _postnormalization_residual_with_position_states(self, residual, position_residual, layer, states, position_states, *args, **kwargs):
+    def _postnormalization_residual_with_two_position_states(self, residual, position_residual, layer, states, position_states, *args, **kwargs):
         value_output, pos_output = layer(states, position_states, *args, **kwargs)
         position_states0 = position_residual[0] + pos_output[0]
         position_states1 = position_residual[1] + pos_output[1]
         return self.norm(residual + value_output), (position_states0, position_states1)
+
+    def _postnormalization_residual_with_one_position_states(self, residual, position_residual, layer, states, position_states, *args, **kwargs):
+        value_output, pos_output = layer(states, position_states, *args, **kwargs)
+        return self.norm(residual + value_output), pos_output
 
     def _deepnorm_residual(self, residual, layer, states, *args, **kwargs):
         return self.norm(residual * self.alpha + self.dropout(layer(states, *args, **kwargs)))

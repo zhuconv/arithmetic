@@ -32,10 +32,10 @@ def check_and_merge_2d_lists(json_files):
 # Example usage
 if __name__ == "__main__":
     # List of JSON file paths
-    from arithmetic_eval_quicker import grid_plotter
+    from eval_arithmetic import grid_plotter
     path = f'/scratch/gpfs/pw4811/arithmetic/cramming-data/{name}/downstream'
     json_files = [
-        f'{path}/accs_grid_quick_big_eval_{i}.json' for i in range(1, 9)
+        f'{path}/accs_{i}.json' for i in range(1, 9)
         ]
     try:
         merged_result = check_and_merge_2d_lists(json_files)

@@ -25,12 +25,13 @@ def grid_plotter(data, type="accs", name='_large', extra_path=None):
 
     # Create the heatmap
     plt.figure(figsize=(10, 8))
-    sns.heatmap(df, cmap="YlGnBu", fmt=".1f", annot_kws={'size': 8,'rotation':0}, vmin=0, vmax=1)
+    sns.heatmap(df, cmap="YlGnBu", fmt=".1f", annot_kws={'size': 8,'rotation':0}, vmin=0, vmax=100)
+    plt.title(f"Average Accuracy: {df.mean(axis=None)}")
     
     # Customize the plot
-    plt.title("Accuracy - percetange, rounded to 1dp")
-    plt.ylabel("1st Number Length")
-    plt.xlabel("2nd Number Length")
+    # plt.title("Accuracy - percetange, rounded to 1dp")
+    # plt.ylabel("1st Number Length")
+    # plt.xlabel("2nd Number Length")
     size = data.shape[0]
     plt.xticks(np.arange(0.5, size+0.5, 10), labels=np.arange(0, size, 10))
     plt.yticks(np.arange(0.5, size+0.5, 10), labels=np.arange(0, size, 10))

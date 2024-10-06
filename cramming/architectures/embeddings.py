@@ -203,6 +203,7 @@ class LearnablePositionalRand(torch.nn.Module):
         position_ids = torch.sort(torch.randperm(max_length, dtype=torch.long, device=device)[:seq_length]).values
         return self.embedding(position_ids)
 
+
 # Code stolen from GPT-X:
 class Rotary(torch.nn.Module):
     def __init__(self, dim, base=10000, def_seq_length=128, seq_dim: int = 0):
@@ -240,6 +241,7 @@ class Rotary(torch.nn.Module):
         return self.cos_cached, self.sin_cached
 
     def _get_cos_sin(self):
+        # t = torch.sort(torch.randperm(self.max_length)[:seq_length]).values
         t = torch.arange(self.seq_len_cached).type_as(self.inv_freq)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -261,6 +263,54 @@ class Rotary(torch.nn.Module):
     def rotate_half(self, x: torch.Tensor):
         x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)  # torch.split(x, x.shape[-1] // 2, dim=-1)  # not faster
+
+class RandomRotary(Rotary):
+    def __init__(self, dim, base=10000, def_seq_length=128, seq_dim: int = 0):
+        super(Rotary, self).__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=True)
+        self.seq_len_cached = def_seq_length
+        self.seq_dim = seq_dim
+        # cos_cache, sin_cache = self._get_cos_sin()
+        # self.register_buffer("cos_cached", cos_cache, persistent=False)
+        # self.register_buffer("sin_cached", sin_cache, persistent=False)
+
+        # Force fusions on batched version
+        def rotate_half(x: torch.Tensor):
+            x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]  # torch.split(x, x.shape[-1] // 2, dim=-1)  # not faster
+            return torch.cat((-x2, x1), dim=-1)
+
+        def rope_fn(cos: torch.Tensor, sin: torch.Tensor, query_layer: torch.Tensor, key_layer: torch.Tensor):
+            # sin, cos: [seq_len, 1, 1, head_dim]
+            # qk: [seq_len, bsz, num_head, head_dim]
+            QK = torch.cat([query_layer, key_layer], dim=1)
+            rotated = QK * cos[: QK.shape[0]] + rotate_half(QK) * sin[: QK.shape[0]]
+            return torch.split(rotated, query_layer.shape[1], dim=1)
+
+        self.rope_fn = rope_fn  # handle fusion on module level
+ 
+
+    @torch.no_grad()
+    def get_cos_sin_cache(self, x: torch.Tensor):
+        seq_len = x.shape[self.seq_dim]
+        # if seq_len != self.seq_len_cached:
+        self.seq_len_cached = x.shape[self.seq_dim]
+        cos_cache, sin_cache = self._get_cos_sin(seq_len)
+        cos_cache = cos_cache.to(x.device)
+        sin_cache = sin_cache.to(x.device)
+        return cos_cache, sin_cache
+
+    def _get_cos_sin(self, seq_len):
+        assert self.seq_len_cached >= seq_len
+        t = torch.sort(torch.randperm(self.seq_len_cached)[:seq_len]).values.type_as(self.inv_freq)
+        # t = torch.arange(self.seq_len_cached).type_as(self.inv_freq)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        if self.seq_dim == 0:
+            return emb.cos()[:, None, None, :].detach(), emb.sin()[:, None, None, :].detach()
+        else:
+            return emb.cos()[None, :, None, :].detach(), emb.sin()[None, :, None, :].detach()
+
 
 class RotarySanityCheck(torch.nn.Module):
     """not again..."""
@@ -503,13 +553,25 @@ class YaRNRotary(torch.nn.Module):
             sin_expanded.to(dtype=x.dtype),
         )
 
+    def find_adayarn_rmap_mask(self):
+        r = ( self.original_max_position_embeddings * self.inv_freq ) / ( math.pi * 2 )
+        def linear_ramp_mask(min, max, var):
+            if min == max:
+                max += 0.001  # Prevent singularity
+            linear_func = (var - min) / (max - min)
+            ramp_func = torch.clamp(linear_func, 0, 1)
+            return ramp_func
+        mask_coef = linear_ramp_mask(self.beta_slow, self.beta_fast, r)
+        return mask_coef
+
     def yarn(self, scale, device):
         # pos_freqs = 1.0 / 
         inv_freq_extrapolation = self.inv_freq
         inv_freq_interpolation = inv_freq_extrapolation / scale
 
-        low, high = find_correction_range(self.beta_fast, self.beta_slow, self.dim, self.base, self.original_max_position_embeddings)
-        inv_freq_mask = (1 - linear_ramp_mask(low, high, self.dim // 2).to(device)) * self.extrapolation_factor # Get n-d rotational scaling corrected for extrapolation
+        # low, high = find_correction_range(self.beta_fast, self.beta_slow, self.dim, self.base, self.original_max_position_embeddings)
+        # inv_freq_mask = (1 - linear_ramp_mask(low, high, self.dim // 2).to(device)) * self.extrapolation_factor # Get n-d rotational scaling corrected for extrapolation
+        inv_freq_mask = self.find_adayarn_rmap_mask() * self.extrapolation_factor
         inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
 
         self.mscale = float(get_mscale(scale) * self.attn_factor) # Get n-d magnitude scaling corrected for interpolation
@@ -613,6 +675,92 @@ class AdaRotary(torch.nn.Module):
             sin_expanded.to(dtype=x.dtype),
         )
 
+def get_slopes(n):
+    def get_slopes_power_of_2(n):
+        # start is 2^(-8/n)
+        start = (2**(-2**-(math.log2(n)-3)))
+        ratio = start
+        return [start*ratio**i for i in range(n)]
+
+    if math.log2(n).is_integer():
+        return get_slopes_power_of_2(n)                   
+    else:                                                 
+        closest_power_of_2 = 2**math.floor(math.log2(n)) 
+        return get_slopes_power_of_2(closest_power_of_2) + get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
+
+def rbf_torch(X, P=2, device=None):
+    """
+    :param X: Input data matrix, shape: (N, d)
+    :param P: Number of samples we draw to approximate the kernel.
+    :param device: Device to perform computations on ('cpu' or 'cuda')
+    :return: Randomized binning feature map matrix Z, shape: (N, sum of unique bins across P iterations)
+    """
+    # Move input data to the specified device and ensure dtype consistency
+    X = X.to(device)
+    N, d = X.shape
+
+    # Define the Gamma distribution on the specified device with appropriate dtype
+    gamma_dist = torch.distributions.Gamma(
+        concentration=torch.tensor(2.0, device=device, dtype=X.dtype),
+        rate=torch.tensor(1.0, device=device, dtype=X.dtype)
+    )
+    Z = []
+
+    for p in range(P):
+        # Sample delta from the Gamma distribution
+        delta = gamma_dist.sample((d,))  # Shape: (d,)
+
+        # Generate shift parameters u with appropriate dtype
+        u = torch.rand(d, device=device, dtype=X.dtype) * delta  # Shape: (d,)
+
+        # Compute bin indices for all data points
+        indices = torch.ceil((X - u) / delta).long()  # Shape: (N, d)
+
+        # Find unique indices and inverse mapping
+        unique_indices, inverse_indices = torch.unique(
+            indices, dim=0, return_inverse=True
+        )
+        length = unique_indices.shape[0]
+
+        # Create one-hot vectors on the specified device with appropriate dtype
+        one_hot_vectors = torch.zeros(
+            (N, length), dtype=X.dtype, device=device
+        )
+        one_hot_vectors[
+            torch.arange(N, device=device), inverse_indices
+        ] = 1
+
+        Z.append(one_hot_vectors)
+
+    # Concatenate and normalize the feature maps with appropriate dtype
+    Z = torch.hstack(Z) / torch.sqrt(torch.tensor(P, dtype=X.dtype, device=device))
+    return Z
+
+class Adalibi(torch.nn.Module):
+    def __init__(self, num_heads, max_position_embeddings):
+        super().__init__()
+        self.num_heads = num_heads
+        self.max_position_embeddings = max_position_embeddings
+
+    def forward(self, x, seq_len=None):
+        dtype = x.dtype
+        if self.training:
+            k = random.randint(0, 99)
+        t = torch.arange(k, seq_len + k, device=x.device, dtype=dtype).reshape(-1, 1)
+        random_emb = rbf_torch(t, device=x.device) # (seq_len, hidden_dim)
+        # print(random_emb.shape[1], 'shape')
+        slopes = torch.tensor(get_slopes(self.num_heads), device=x.device, dtype=dtype)
+
+        sqrt_slopes = torch.sqrt(torch.exp(slopes)).view(self.num_heads, 1, 1) 
+        # (1, attn_heads, seq_len, hidden_dim)
+        alibi_emb = ( sqrt_slopes * random_emb.unsqueeze(0) ).unsqueeze(0)
+
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        # alibi_emb: [1, num_heads, seq_len, hidden_size]
+        # alibi_emb = alibi_emb.to(dtype=x.dtype)
+        # should output: [seq_len, 1, num_heads, hidden_size]
+        return alibi_emb.permute(2, 0, 1, 3)
+
 class FIRE(torch.nn.Module):
     def __init__(self, num_heads=12, mlp_width=32, init_c=0.1, init_L=512.0, eps=1e-6, max_length=0):
         """
@@ -658,7 +806,8 @@ class FIRE(torch.nn.Module):
             max_length = self.max_length
 
         # take a subset (of length seq_length) of a random permutation of length max_length, then sort it to
-        positions = torch.sort(torch.randperm(max_length, dtype=torch.float, device=device)[:seq_length]).values
+        # positions = torch.sort(torch.randperm(max_length, dtype=torch.float, device=device)[:seq_length]).values
+        positions = torch.arange(max_length, dtype=torch.float, device=device)
         relative_distances = positions[:, None] - positions[None, :]
         
         # Thresholding the normalizer for short sequence modeling

@@ -98,16 +98,22 @@ class AdaPE(torch.nn.Module):
         q_len, bsz, *_ = x.shape
         # new up_e: seq_len, bsz, positions_size, head_dim
         # up_e: (batch_size, position_size, seq_len, heads_dim)
-        up_e = tuple(
-            torch.einsum('qbnd,en->qbed', i, self.up_proj.weight) for i in e
-        )
-        # new x_e: seq_len, bsz, position_size, head_dim
-        x_e = tuple(
-             self.act_fn(self.x_proj(x)).unsqueeze(-1) * i for i in up_e
-        )
-        down_e = tuple(
-            torch.einsum('qbnd,en->qbed', i, self.down_proj.weight) for i in x_e
-        )
+        if isinstance(e, tuple):
+            up_e = tuple(
+                torch.einsum('qbnd,en->qbed', i, self.up_proj.weight) for i in e
+            )
+            # new x_e: seq_len, bsz, position_size, head_dim
+            x_e = tuple(
+                self.act_fn(self.x_proj(x)).unsqueeze(-1) * i for i in up_e
+            )
+            down_e = tuple(
+                torch.einsum('qbnd,en->qbed', i, self.down_proj.weight) for i in x_e
+            )
+        else:
+            up_e = torch.einsum('qbnd,en->qbed', e, self.up_proj.weight)
+            # new x_e: seq_len, bsz, position_size, head_dim
+            x_e = self.act_fn(self.x_proj(x)).unsqueeze(-1) * up_e
+            down_e = torch.einsum('qbnd,en->qbed', x_e, self.down_proj.weight)
         # down_e = torch.matmul(prime, e[0]), torch.matmul(prime, e[1])
         # down_e =  ( prime * e[0], prime * e[1] )
         return down_e
@@ -192,7 +198,7 @@ class TransposedAdapter(torch.nn.Linear):  # steal init
     def forward(self, inputs):
         return torch.nn.functional.linear(inputs, self.weight.T)
 
-from .embeddings import AdaRotary, YaRNRotary
+from .embeddings import AdaRotary, YaRNRotary, Adalibi
 
 class ScriptableAdaRecurrentLM(PreTrainedModel):
     """Depth-recurrent model. Trying to include most reasonable variations of this concept"""
@@ -230,8 +236,12 @@ class ScriptableAdaRecurrentLM(PreTrainedModel):
             self.final_norm = torch.nn.Identity()
         self.register_buffer("attention_mask", torch.ones([0, 0, 0, 0], dtype=torch.bool), persistent=False)
         cfg_attention = self.cfg.attention
-        # self.rotary_emb = AdaRotary(self.cfg.hidden_size // cfg_attention.num_attention_heads, cfg_attention.num_attention_heads, max_position_embeddings=cfg_attention.max_length, scaling_factor=1)
-        self.rotary_emb = YaRNRotary(self.cfg.hidden_size // cfg_attention.num_attention_heads, cfg_attention.num_attention_heads, max_position_embeddings=cfg_attention.max_length, original_max_position_embeddings=cfg_attention.max_length)
+        if cfg_attention.rotary_embedding == 'adape':
+            self.rotary_emb = AdaRotary(self.cfg.hidden_size // cfg_attention.num_attention_heads, cfg_attention.num_attention_heads, max_position_embeddings=cfg_attention.max_length, scaling_factor=1)
+        elif cfg_attention.rotary_embedding == 'adayarn':
+            self.rotary_emb = YaRNRotary(self.cfg.hidden_size // cfg_attention.num_attention_heads, cfg_attention.num_attention_heads, max_position_embeddings=cfg_attention.max_length, original_max_position_embeddings=cfg_attention.max_length)
+        elif cfg_attention.rotary_embedding == 'adalibi':
+            self.rotary_emb = Adalibi(cfg_attention.num_attention_heads, cfg_attention.max_length)
 
     def forward(self, input_ids: torch.Tensor, num_steps_no_grad: int = None, num_steps_with_grad: int = None):
         # no_grad = 0, with_grad = 1

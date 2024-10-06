@@ -2,7 +2,7 @@
 import torch
 from transformers.models.bert.modeling_bert import BertSelfAttention
 
-from .embeddings import Rotary, RotarySanityCheck, RotaryEleutherAI, RotaryLLAMA, FIRE, AdaRotary
+from .embeddings import Rotary, RotarySanityCheck, RotaryEleutherAI, RotaryLLAMA, FIRE, AdaRotary, RandomRotary
 from typing import Optional
 
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear  # use to mark output projections of attn while it exists
@@ -11,7 +11,7 @@ from torch.nn.modules.linear import NonDynamicallyQuantizableLinear  # use to ma
 def get_attention_mechanism(idx, hidden_size, cfg_attention, norm_fn: torch.nn.Identity):
     # ########## main implementation
     if cfg_attention.type == "self-attention":
-        if cfg_attention.rotary_embedding == "adape":
+        if cfg_attention.rotary_embedding in ["adape", 'adayarn', 'adalibi']:
             mechanism = SeqFirstSelfAdaAttention(hidden_size, cfg_attention, norm_fn)
         else:
             mechanism = SeqFirstSelfAttention(hidden_size, cfg_attention, norm_fn)  # neox
@@ -174,9 +174,11 @@ class SeqFirstSelfAdaAttention(torch.nn.MultiheadAttention):
         elif cfg_attention.rotary_embedding == "fire":
             self.rotary_emb = FIRE(cfg_attention.num_attention_heads, max_length=cfg_attention.max_length)
             self.use_fire = True
-        elif cfg_attention.rotary_embedding == 'adape':
-            self.rotary_emb = None
-        elif cfg_attention.rotary_embedding: # other include rope
+        #! this branch should be placed before "Rotary"
+        elif cfg_attention.rotary_embedding in ['adape', 'adayarn', 'adalibi']:
+            self.rotary_emb = cfg_attention.rotary_embedding
+
+        elif cfg_attention.rotary_embedding: # others include rope
             self.rotary_emb = Rotary(self.hidden_per_head, seq_dim=0)
         else:
             self.rotary_emb = None
@@ -205,7 +207,8 @@ class SeqFirstSelfAdaAttention(torch.nn.MultiheadAttention):
 
         self.attention_func = self.attention
 
-    def attention(self, query_layer, key_layer, value_layer, position_layer, attention_mask: Optional[torch.Tensor] = None, training: bool = False, fire: Optional[torch.Tensor] = None):
+    def attention(self, query_layer, key_layer, value_layer, position_layer, attention_mask: Optional[torch.Tensor] = None, training: bool = False, fire: Optional[torch.Tensor] = None, epsilon = 1e-7):
+            
         # ===================================
         # Raw attention scores. [b, np, s, s]
         # ===================================
@@ -220,8 +223,18 @@ class SeqFirstSelfAdaAttention(torch.nn.MultiheadAttention):
         # this better be fused in a clever way:
         matmul_result = torch.bmm(query_layer.transpose(0, 1), key_layer.transpose(0, 1).transpose(1, 2)) * self.norm_factor
 
+
         # change view to [b, np, sq, sk]
-        attention_scores = matmul_result.view(output_size[0], output_size[1], output_size[2], output_size[3])
+
+        attention_scores = matmul_result.view(output_size[0], output_size[1], output_size[2], output_size[3]) 
+
+        # alibi shape: [sq, 1, np, hidden]
+        # pos_scores shape: [b, 1, sq, sk]
+        if self.rotary_emb == 'adalibi':
+            pos_scores = torch.matmul(position_layer.permute(1, 2, 0, 3), position_layer.permute(1, 2, 3, 0))
+            pos_clamped = torch.clamp(pos_scores, min=epsilon)
+            attention_scores += torch.log(pos_clamped)
+
         if fire is not None:
             attention_scores += fire
 
@@ -233,9 +246,12 @@ class SeqFirstSelfAdaAttention(torch.nn.MultiheadAttention):
 
         # [b, np, sq, sk]
         # position_layer: [sk, 1, np, hn]
-        position_layer0 = torch.einsum('qbnh,bnqk->kbnh', position_layer[0], attention_probs)
-        position_layer1 = torch.einsum('qbnh,bnqk->kbnh', position_layer[1], attention_probs)
-        position_layer = (position_layer0, position_layer1)
+        if self.rotary_emb == 'adalibi':
+            position_layer = torch.einsum('qbnh,bnqk->kbnh', position_layer, attention_probs)
+        else:
+            position_layer0 = torch.einsum('qbnh,bnqk->kbnh', position_layer[0], attention_probs)
+            position_layer1 = torch.einsum('qbnh,bnqk->kbnh', position_layer[1], attention_probs)
+            position_layer = (position_layer0, position_layer1)
 
         # =========================
         # Context layer. [sq, b, hp]
@@ -299,7 +315,12 @@ class SeqFirstSelfAdaAttention(torch.nn.MultiheadAttention):
         
         fire = None
         # position_state: 2 x [seq, 1, num_heads, head_dim]
-        self.apply_rotary_emb(query_layer, key_layer, position_states)
+        if self.rotary_emb in ['adape', 'adayarn']:
+            self.apply_rotary_emb(query_layer, key_layer, position_states)
+        else:
+            assert self.rotary_emb == 'adalibi', 'Supported rotary type: adalibi, adape and adayarn'
+            # pos_weights = torch.matmul(position_states, position_states.transpose(2, 3))
+
         # if self.rotary_emb is not None:
             # if 
             # elif self.use_fire:
@@ -364,6 +385,8 @@ class SeqFirstSelfAttention(torch.nn.MultiheadAttention):
         elif cfg_attention.rotary_embedding == "fire":
             self.rotary_emb = FIRE(cfg_attention.num_attention_heads, max_length=cfg_attention.max_length)
             self.use_fire = True
+        elif cfg_attention.rotary_embedding == 'randomized':
+            self.rotary_emb = RandomRotary(self.hidden_per_head, seq_dim=0)
         elif cfg_attention.rotary_embedding: # other include rope
             self.rotary_emb = Rotary(self.hidden_per_head, seq_dim=0)
         else:

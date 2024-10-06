@@ -1,4 +1,7 @@
 outputs
+.vscode/
+legacy
+*.sh
 tables/*/*.csv
 tables/*/*.csv#
 tables/*.csv
